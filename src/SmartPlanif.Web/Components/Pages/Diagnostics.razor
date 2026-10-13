@@ -1,0 +1,153 @@
+@page "/diagnostics"
+@inject DatabaseDiagnosticsService DiagnosticsService
+@inject PlanningCalendar Calendar
+
+<PageTitle>Diagnostic</PageTitle>
+
+<h1>Diagnostic de la base</h1>
+<p class="muted">
+    Lecture seule. Compare ce que contient la base à ce que le moteur parvient à charger pour un jour de service,
+    et explique chaque écart. <strong>À lancer en premier sur vos données réelles.</strong>
+</p>
+
+<div class="panel">
+    <div class="form-grid compact">
+        <label>Jour de service demandé
+            <input type="date" @bind="_dateInput" disabled="@_running" /></label>
+    </div>
+    <div class="toolbar">
+        <button class="btn primary" @onclick="RunAsync" disabled="@_running">Lancer le diagnostic</button>
+    </div>
+</div>
+
+@if (_error is not null)
+{
+    <div class="alert error">@_error</div>
+}
+
+@if (_report is not null)
+{
+    <h2>Constats</h2>
+    @foreach (var finding in _report.Findings)
+    {
+        <div class="alert @LevelCss(finding.Level)">@finding.Message</div>
+    }
+
+    <h2>Chiffres du jour</h2>
+    <div class="kpis">
+        <div class="kpi"><span class="value">@_report.Raw.TripsOfDay</span><span>voyages dans trips</span></div>
+        <div class="kpi"><span class="value">@_report.TripsLoaded</span><span>voyages chargés par le moteur</span></div>
+        <div class="kpi"><span class="value">@_report.Raw.TripsOfDayWithPlannedResources</span><span>avec ressources prévues (*_PR)</span></div>
+        <div class="kpi"><span class="value">@_report.Raw.TripsOfDayWithRealResources</span><span>avec ressources réelles (*_RE)</span></div>
+        <div class="kpi"><span class="value">@_report.ActiveBuses</span><span>bus actifs</span></div>
+        <div class="kpi"><span class="value">@_report.DriversMapped / @_report.ReceiversMapped / @_report.OtherAgents</span><span>aptes chauffeur / aptes receveur / non planifiables</span></div>
+    </div>
+
+    @if (_report.Raw.ResourceColumns.Count > 0)
+    {
+        <h3>Colonnes de ressources de trips (ce jour-là)</h3>
+        <p class="muted small">« Valides » = identifiant strictement positif. Les valeurs 0 sont traitées comme « aucune ressource ».</p>
+        <table class="grid">
+            <thead><tr><th>Colonne</th><th>Non NULL</th><th>Valides (&gt; 0)</th><th>Valant 0</th></tr></thead>
+            <tbody>
+                @foreach (var column in _report.Raw.ResourceColumns)
+                {
+                    <tr><td><code>@column.Column</code></td><td>@column.NonNull</td><td>@column.Positive</td><td>@column.Zero</td></tr>
+                }
+            </tbody>
+        </table>
+    }
+
+    @if (_report.Raw.LineDurations.Count > 0)
+    {
+        <h3>Durées par ligne (itinéraire dritin, utilisé quand stop_times est vide)</h3>
+        <p class="muted small">
+            Vérifiez que la <strong>durée retenue</strong> et la <strong>vitesse</strong> sont plausibles (bus : environ 15 à 60 km/h).
+            Si elles ne le sont pas, fixez <code>TripSource:ItineraryDuration</code> à <code>MaxCumulative</code> ou <code>SumOfLegs</code>.
+        </p>
+        <table class="grid">
+            <thead><tr><th>Ligne</th><th>Voyages</th><th>Arrêts</th><th>DEDURTR min / max / somme</th><th>Km max</th><th>Durée retenue</th><th>Vitesse</th><th>Méthode</th></tr></thead>
+            <tbody>
+                @foreach (var line in _report.Raw.LineDurations)
+                {
+                    <tr class="@(line.ResolvedMinutes is null ? "row-hard" : "")">
+                        <td>@line.Label</td><td>@line.TripsOfDay</td><td>@line.Stops</td>
+                        <td>@(line.MinMinutes?.ToString() ?? "—") / @(line.MaxMinutes?.ToString() ?? "—") / @(line.SumMinutes?.ToString() ?? "—")</td>
+                        <td>@(line.MaxKm?.ToString() ?? "—")</td>
+                        <td>@(line.ResolvedMinutes is { } m ? $"{m:0} min" : "—")</td>
+                        <td>@(line.SpeedKmh is { } v ? $"{v:0} km/h" : "—")</td>
+                        <td>@line.Method</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+
+    @RenderCounts("Valeurs de dragent.DECQUAL (genre : sans effet sur le poste)", _report.Raw.AgentQualifications)
+    @RenderCounts("Valeurs de dragent.DECJOUR (jour de repos)", _report.Raw.AgentRestDays)
+    @RenderCounts("Valeurs de trips.ETAT ce jour-là", _report.Raw.TripStates)
+    @RenderCounts("Types de ligne des voyages du jour", _report.Raw.LineTypesOfDay)
+    @RenderCounts("Bus par catégorie", _report.Raw.BusCategories)
+    @RenderCounts("Bus actifs / inactifs", _report.Raw.BusActivity)
+
+    <h3>Exemples de voyages (valeurs brutes, pour vérifier les formats de date)</h3>
+    <ul>
+        @foreach (var sample in _report.Raw.SampleTrips)
+        {
+            <li><code>@sample</code></li>
+        }
+    </ul>
+    <p class="muted small">Table trips : @_report.Raw.TotalTripsInTable ligne(s), du @_report.Raw.FirstTripDay?.ToString("dd/MM/yyyy") au @_report.Raw.LastTripDay?.ToString("dd/MM/yyyy").</p>
+}
+
+@code {
+    private DateTime _dateInput;
+
+    protected override void OnInitialized() => _dateInput = Calendar.Today.ToDateTime(TimeOnly.MinValue);
+    private bool _running;
+    private string? _error;
+    private DatabaseDiagnosticReport? _report;
+
+    private async Task RunAsync()
+    {
+        _running = true;
+        _error = null;
+        try
+        {
+            _report = await DiagnosticsService.RunAsync(DateOnly.FromDateTime(_dateInput), CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            _error = "Diagnostic impossible : " + ex.Message;
+        }
+        finally
+        {
+            _running = false;
+        }
+    }
+
+    private static string LevelCss(string level) => level switch
+    {
+        "ok" => "ok",
+        "warn" => "warn",
+        "error" => "error",
+        _ => "",
+    };
+
+    private RenderFragment RenderCounts(string title, IReadOnlyList<Application.Abstractions.DiagnosticCount> counts) => __builder =>
+    {
+        if (counts.Count > 0)
+        {
+            <h3>@title</h3>
+            <table class="grid">
+                <thead><tr><th>Valeur</th><th>Nombre</th></tr></thead>
+                <tbody>
+                    @foreach (var item in counts)
+                    {
+                        <tr><td>@item.Label</td><td>@item.Count</td></tr>
+                    }
+                </tbody>
+            </table>
+        }
+    };
+}

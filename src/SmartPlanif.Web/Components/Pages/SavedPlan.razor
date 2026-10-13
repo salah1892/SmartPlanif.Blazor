@@ -1,0 +1,106 @@
+@page "/saved-plan"
+@inject SavedPlanService SavedPlanService
+@inject PlanningCalendar Calendar
+
+<PageTitle>Plan enregistré</PageTitle>
+
+<h1>Plan prévu enregistré dans trips</h1>
+<p class="muted">
+    Colonnes <code>BUS_PR</code>, <code>CHAUFF_PR</code> et <code>REC_PR</code> de la table trips pour un jour de service.
+    Les colonnes réelles (<code>*_RE</code>) ne sont jamais modifiées par SmartPlanif.
+</p>
+
+<div class="panel">
+    <div class="form-grid compact">
+        <label>Jour de service
+            <input type="date" @bind="_dateInput" /></label>
+    </div>
+    <div class="toolbar">
+        <button class="btn primary" @onclick="LoadAsync">Afficher</button>
+        <button class="btn danger" @onclick="ClearAsync" disabled="@(_rows is null || IsPast)">Effacer le plan prévu de ce jour</button>
+    </div>
+</div>
+
+@if (IsPast)
+{
+    <div class="alert warn">🔒 Journée passée : consultation seulement. Le plan n'est plus modifiable (aujourd'hui : @Calendar.Today.ToString("dd/MM/yyyy")).</div>
+}
+
+@if (_message is not null)
+{
+    <div class="alert @(_success ? "ok" : "error")">@_message</div>
+}
+
+@if (_rows is not null)
+{
+    <p>
+        <strong>@_rows.Count</strong> voyage(s) ce jour-là, dont <strong>@_rows.Count(r => r.BusId is not null)</strong> avec un plan prévu,
+        <strong>@_rows.Count(r => r.HasRealResources)</strong> avec des ressources réelles.
+    </p>
+    <table class="grid @(IsPast ? "past" : "")">
+        <thead>
+            <tr><th rowspan="2">Départ</th><th rowspan="2">Arrivée</th><th rowspan="2">Ligne</th>
+                <th colspan="3">Prévu (notre plan)</th><th colspan="3">Réel (terrain)</th></tr>
+            <tr><th>Bus</th><th>Chauffeur</th><th>Receveur</th><th>Bus</th><th>Chauffeur</th><th>Receveur</th></tr>
+        </thead>
+        <tbody>
+            @foreach (var row in _rows)
+            {
+                <tr class="@(row.BusId is null && !IsPast ? "row-hard" : "")">
+                    <td>@row.Departure.ToString("HH:mm")</td>
+                    <td>@(row.Arrival?.ToString("HH:mm") ?? "?")</td>
+                    <td>@row.LineLabel</td>
+                    <td>@(row.BusPlate ?? "—")</td>
+                    <td>@(row.DriverName ?? "—")</td>
+                    <td>@(row.ReceiverName ?? "—")</td>
+                    <td>@(row.RealBusPlate ?? "")</td>
+                    <td>@(row.RealDriverName ?? "")</td>
+                    <td>@(row.RealReceiverName ?? "")</td>
+                </tr>
+            }
+        </tbody>
+    </table>
+}
+
+@code {
+    private DateTime _dateInput;
+    private IReadOnlyList<Application.Abstractions.SavedTripAssignment>? _rows;
+    private string? _message;
+    private bool _success;
+
+    private DateOnly SelectedDate => DateOnly.FromDateTime(_dateInput);
+
+    private bool IsPast => !Calendar.IsEditable(SelectedDate);
+
+    protected override void OnInitialized() => _dateInput = Calendar.Today.ToDateTime(TimeOnly.MinValue);
+
+    private async Task LoadAsync()
+    {
+        try
+        {
+            _rows = await SavedPlanService.GetAsync(SelectedDate);
+            _message = null;
+        }
+        catch (Exception ex)
+        {
+            _success = false;
+            _message = "Lecture impossible : " + ex.Message;
+        }
+    }
+
+    private async Task ClearAsync()
+    {
+        try
+        {
+            var cleared = await SavedPlanService.ClearAsync(SelectedDate);
+            _success = true;
+            _message = $"{cleared} voyage(s) vidé(s) (colonnes *_PR mises à NULL ; les voyages effectués ne sont jamais touchés).";
+            _rows = await SavedPlanService.GetAsync(SelectedDate);
+        }
+        catch (Exception ex)
+        {
+            _success = false;
+            _message = "Effacement impossible : " + ex.Message;
+        }
+    }
+}
